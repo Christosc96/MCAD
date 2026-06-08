@@ -4,9 +4,14 @@ import random
 import stumpy
 import math
 from stumpy import config
+import tqdm
+
+
+
+
+
 
 config.STUMPY_EXCL_ZONE_DENOM = 1
-
 
 class TimeSeriesGenerator:
     """Handles time series data generation"""
@@ -71,7 +76,7 @@ class TimeSeriesGenerator:
         noise = np.random.normal(0, 0.01, length)
         return amplitude * rise + noise
 
-    def generate_data(self, T=5000, N=4, k=3, random_templates=True, discord_length=50, normality_coef=2, min_gaps=None):
+    def generate_data(self, T=5000, N=4, k=3, random_templates=True, discord_length=50, normality_coef=2, min_gaps=[]):
         """Generate time series data with events"""
         np.random.seed(np.random.randint(0, 10000))
 
@@ -89,12 +94,15 @@ class TimeSeriesGenerator:
             template_func = self.template_functions[channel_template_indices[i]]
             templates.append(template_func(event_lengths[i], amplitude=2.0))
 
+        min_gaps = [50] * N
+
         series = np.random.normal(0, 0.01, (N, T))
         events_log = []
 
         subsets = []
         for k_c in range(2, k):
             subsets = subsets + list(combinations(range(N), k_c))
+
         random.shuffle(subsets)
 
         rng = np.random.default_rng()
@@ -156,9 +164,10 @@ class TimeSeriesGenerator:
 
 def flatten_sliding_windows(X, W, stride=1):
     """Flatten sliding windows for multivariate time series"""
+    d, N = X.shape
     windows = np.lib.stride_tricks.sliding_window_view(X, window_shape=W, axis=1)
     windows = windows[:, ::stride, :]  # (d, num_windows, W)
-    return windows.transpose(1, 0, 2).reshape(windows.shape[1], -1).flatten()
+    return windows.transpose(1, 0, 2).reshape(windows.shape[1], d * W).flatten()
 
 
 def subsets(S):
@@ -215,11 +224,11 @@ def run_discord_analysis(series, selected_channels, n_channels, m=50):
         dict with keys 'all_results', 'mean_scores', 'std_scores'
     """
     prof = discord_profile(selected_channels, n_channels)
-
+    print(prof)
     scores_by_arity = {}
     all_results = []
 
-    for subset in prof:
+    for subset in tqdm.tqdm(prof):
         if len(subset) == 0:
             continue
         try:
@@ -244,13 +253,18 @@ def run_discord_analysis(series, selected_channels, n_channels, m=50):
 
 if __name__ == '__main__':
     # Parameters
-    T              = 5000
-    N              = 4
+    T              = 10000
+    N              = 6
     k              = 3
     discord_length = 50
     normality_coef = 2
     m              = 50            # window size for analysis
     selected_channels = [0, 1, 2]  # channels to analyse
+
+    # hacky way to generate a full dataset that can be then downloaded
+
+    selected_channels = list(range(N))
+
 
     # Generate data
     gen    = TimeSeriesGenerator()
