@@ -195,6 +195,7 @@ def supersets(S, n):
 def discord_profile(S, n_channels):
     """Generate discord profile: all subsets and supersets of S"""
     prof = subsets(S) + supersets(S, n_channels)
+    print(prof)
     return [list(s) for s in prof]
 
 
@@ -206,6 +207,8 @@ def get_discord_score(X, subset=None, m=50):
 
     if flattened.shape[0] < 2:
         return 0.0
+
+    flattened = flattened.astype(np.float32)
 
     matrix_profile = stumpy.stump(flattened, m=new_m, normalize=False)
     top_k_idx = np.argsort(matrix_profile[:, 0] * math.sqrt(1 / new_m))[-1]
