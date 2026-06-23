@@ -6,11 +6,17 @@ import math
 from stumpy import config
 import tqdm
 import pandas as pd
+from numba import cuda
 
+import warnings
+from numba.core.errors import NumbaPerformanceWarning
 
+from dask.distributed import Client
 
-
-
+warnings.filterwarnings(
+    "ignore",
+    category=NumbaPerformanceWarning
+)
 
 config.STUMPY_EXCL_ZONE_DENOM = 1
 
@@ -195,7 +201,7 @@ def supersets(S, n):
 def discord_profile(S, n_channels):
     """Generate discord profile: all subsets and supersets of S"""
     prof = subsets(S) + supersets(S, n_channels)
-    print(prof)
+    #print(prof)
     return [list(s) for s in prof]
 
 
@@ -203,14 +209,18 @@ def get_discord_score(X, subset=None, m=50):
     """Calculate discord score for a channel subset"""
     X_sub = X[subset, :] if subset is not None and len(subset) > 0 else X
     new_m = m * X_sub.shape[0]
-    flattened = flatten_sliding_windows(X_sub, m, m)
+    #flattened = flatten_sliding_windows(X_sub, m, m)
+
+    flattened = np.ravel(X_sub, order = 'F')
 
     if flattened.shape[0] < 2:
         return 0.0
 
-    flattened = flattened.astype(np.float32)
-
-    matrix_profile = stumpy.stump(flattened, m=new_m, normalize=False)
+    all_gpu_devices = [device.id for device in cuda.list_devices()]
+    matrix_profile = stumpy.gpu_stump(flattened, m=new_m, normalize=False, device_id = all_gpu_devices)
+    #matrix_profile = stumpy.stump(flattened, m=new_m, normalize=False)
+    #with Client() as dask_client:
+    #    matrix_profile = stumpy.stumped(dask_client, flattened, m=new_m, normalize=False)
     top_k_idx = np.argsort(matrix_profile[:, 0] * math.sqrt(1 / new_m))[-1]
     return matrix_profile[top_k_idx, 0] * math.sqrt(1 / new_m)
 
@@ -228,7 +238,7 @@ def run_discord_analysis(series, selected_channels, n_channels, m=50):
         dict with keys 'all_results', 'mean_scores', 'std_scores'
     """
     prof = discord_profile(selected_channels, n_channels)
-    print(prof)
+    #print(prof)
     scores_by_arity = {}
     all_results = []
 
@@ -252,13 +262,21 @@ def run_discord_analysis(series, selected_channels, n_channels, m=50):
         'std_scores':  std_scores,
     }
 
-def save_analysis_as_dataframe(analysis, n_channels,
-                               output_file="discord_dataset.parquet"):
+def save_analysis_as_dataframe(
+        analysis,
+        n_channels,
+        dataset_name,
+        N,
+        k,
+        T,
+        extension="parquet"):
     """
-    Convert analysis['all_results'] into a binary-channel dataframe.
+    Saves dataset as:
 
-    Columns:
-        ch0, ch1, ..., ch(N-1), arity, score
+        {dataset_name}_{N}_{k}_{T}.{extension}
+
+    Example:
+        discord_10_5_100000.parquet
     """
 
     rows = []
@@ -278,12 +296,14 @@ def save_analysis_as_dataframe(analysis, n_channels,
 
     df = pd.DataFrame(rows)
 
-    if output_file.endswith(".csv"):
-        df.to_csv(output_file, index=False)
-    else:
-        df.to_parquet(output_file, index=False)
+    filename = f"{dataset_name}_{N}_{k}_{T}.{extension}"
 
-    print(f"Saved dataset with {len(df)} rows to {output_file}")
+    if extension == "csv":
+        df.to_csv(filename, index=False)
+    else:
+        df.to_parquet(filename, index=False)
+
+    print(f"Saved dataset to {filename}")
 
     return df
 
@@ -291,15 +311,15 @@ def save_analysis_as_dataframe(analysis, n_channels,
 
 if __name__ == '__main__':
     # Parameters
-    T              = 10000
-    N              = 4
+    T              = 8000
+    N              = 6
     k              = 3
     discord_length = 50
     normality_coef = 2
     m              = 50            # window size for analysis
     selected_channels = [0, 1, 2]  # channels to analyse
 
-    # hacky way to generate a full dataset that can be then downloaded
+    # use N as a hacky way to generate a full dataset that can be then downloaded
 
     selected_channels = list(range(N))
 
@@ -337,8 +357,12 @@ if __name__ == '__main__':
 
     #save results in dataset
 
-    df = save_analysis_as_dataframe(
-    analysis,
+df = save_analysis_as_dataframe(
+    analysis=analysis,
     n_channels=N,
-    output_file="discord_dataset.csv"
+    dataset_name="example",
+    N=N,
+    k=k,
+    T=T,
+    extension="csv"
 )
