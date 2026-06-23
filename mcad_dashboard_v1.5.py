@@ -9,6 +9,8 @@ import random
 import stumpy
 import math
 from stumpy import config
+import io
+import base64
 
 config.STUMPY_EXCL_ZONE_DENOM = 1
 
@@ -510,6 +512,7 @@ app.index_string = '''
 # App layout
 app.layout = html.Div([
     dcc.Store(id='data-store'),
+    dcc.Download(id='download-npy'),
     
     html.Div([
         # Left control panel
@@ -546,7 +549,8 @@ app.layout = html.Div([
             ], className='control-group'),
             
             html.Button('Generate Data', id='generate-btn', n_clicks=0, className='btn-primary'),
-            
+            html.Button('Download .npy', id='download-npy-btn', n_clicks=0, className='btn-secondary'),
+
             # Discord Analysis Section
             html.Div('Discord Profile Analysis', className='section-header', style={'marginTop': '2rem'}),
             
@@ -1011,6 +1015,30 @@ def update_hover(hover_data_list, figure_list, data):
     
     return hover_text, hover_class, updated_figures
 
+#Callback for downloading dataset
+@app.callback(
+    Output('download-npy', 'data'),
+    Input('download-npy-btn', 'n_clicks'),
+    State('data-store', 'data'),
+    prevent_initial_call=True
+)
+def download_npy(n_clicks, data):
+    if not n_clicks or data is None:
+        return dash.no_update
 
+    series = np.array(data['series'])  # shape: (N, T)
+
+    buffer = io.BytesIO()
+    np.save(buffer, series)
+    buffer.seek(0)
+
+    encoded = base64.b64encode(buffer.read()).decode('utf-8')
+
+    return dict(
+        content=encoded,
+        filename='series.npy',
+        type='application/octet-stream',
+        base64=True
+    )
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=8050)
