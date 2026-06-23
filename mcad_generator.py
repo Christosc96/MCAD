@@ -5,6 +5,7 @@ import stumpy
 import math
 from stumpy import config
 import tqdm
+import pandas as pd
 
 
 
@@ -248,13 +249,47 @@ def run_discord_analysis(series, selected_channels, n_channels, m=50):
         'std_scores':  std_scores,
     }
 
+def save_analysis_as_dataframe(analysis, n_channels,
+                               output_file="discord_dataset.parquet"):
+    """
+    Convert analysis['all_results'] into a binary-channel dataframe.
+
+    Columns:
+        ch0, ch1, ..., ch(N-1), arity, score
+    """
+
+    rows = []
+
+    for result in analysis['all_results']:
+        subset = set(result['subset'])
+
+        row = {
+            f'ch{i}': int(i in subset)
+            for i in range(n_channels)
+        }
+
+        row['arity'] = result['arity']
+        row['score'] = result['score']
+
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    if output_file.endswith(".csv"):
+        df.to_csv(output_file, index=False)
+    else:
+        df.to_parquet(output_file, index=False)
+
+    print(f"Saved dataset with {len(df)} rows to {output_file}")
+
+    return df
 
 # --- Main ---
 
 if __name__ == '__main__':
     # Parameters
     T              = 10000
-    N              = 6
+    N              = 4
     k              = 3
     discord_length = 50
     normality_coef = 2
@@ -295,3 +330,12 @@ if __name__ == '__main__':
     top5 = sorted(analysis['all_results'], key=lambda x: x['score'], reverse=True)[:5]
     for r in top5:
         print(f"  {sorted(r['subset'])}  arity={r['arity']}  score={r['score']:.4f}")
+
+
+    #save results in dataset
+
+    df = save_analysis_as_dataframe(
+    analysis,
+    n_channels=N,
+    output_file="discord_dataset.csv"
+)
