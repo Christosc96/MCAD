@@ -6,12 +6,19 @@ import math
 from stumpy import config
 import tqdm
 import pandas as pd
-from numba import cuda
+import numba
 
 import warnings
 from numba.core.errors import NumbaPerformanceWarning
+numba.set_num_threads(32)
 
 from dask.distributed import Client
+
+#from worker_utils import score_subset
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing as mp
+
+ctx = mp.get_context("spawn")
 
 warnings.filterwarnings(
     "ignore",
@@ -19,6 +26,18 @@ warnings.filterwarnings(
 )
 
 config.STUMPY_EXCL_ZONE_DENOM = 1
+
+def score_subset(args):
+    series, subset, m = args
+    try:
+        score = get_discord_score(series, subset=subset, m=m)
+        return {
+            "subset": subset,
+            "arity": len(subset),
+            "score": score,
+        }
+    except Exception as e:
+        return e
 
 class TimeSeriesGenerator:
     """Handles time series data generation"""
@@ -83,13 +102,13 @@ class TimeSeriesGenerator:
         noise = np.random.normal(0, 0.01, length)
         return amplitude * rise + noise
 
-    def generate_data(self, T=5000, N=4, k=3, random_templates=True, discord_length=50, normality_coef=2, min_gaps=[]):
+    def generate_data(self, T=5000, N=4, k=3, random_templates=True, discord_length=50, normality_coef=2, min_gaps=[], normality_mode = 'truncated'):
         """Generate time series data with events"""
         np.random.seed(np.random.randint(0, 10000))
 
         event_lengths = [discord_length] * N
-        min_gaps = [50] * N
-
+        #min_gaps = [50] * N
+        min_gaps = [10] * N
         if random_templates:
             rng_template = np.random.default_rng()
             channel_template_indices = rng_template.choice(len(self.template_functions), size=N, replace=True)
@@ -101,14 +120,21 @@ class TimeSeriesGenerator:
             template_func = self.template_functions[channel_template_indices[i]]
             templates.append(template_func(event_lengths[i], amplitude=2.0))
 
-        min_gaps = [50] * N
+        #min_gaps = [50] * N
 
         series = np.random.normal(0, 0.01, (N, T))
         events_log = []
 
         subsets = []
-        for k_c in range(2, k):
-            subsets = subsets + list(combinations(range(N), k_c))
+        #FULL NORMALITY COEFFICIENT
+        if(normality_mode == 'full'):
+            for k_c in range(2, k):
+                subsets = subsets + list(combinations(range(N), k_c))
+        else:
+        #TRUNCATED NORMALITY COEFFICIENT
+            print("\n\n\n using truncated normality coefficient \n\n\n")
+            subsets = list(combinations(range(N), (k-1)))
+            print(len(subsets))
 
         random.shuffle(subsets)
 
@@ -206,6 +232,9 @@ def discord_profile(S, n_channels):
 
 
 def get_discord_score(X, subset=None, m=50):
+
+    from numba import cuda
+
     """Calculate discord score for a channel subset"""
     X_sub = X[subset, :] if subset is not None and len(subset) > 0 else X
     new_m = m * X_sub.shape[0]
@@ -216,11 +245,13 @@ def get_discord_score(X, subset=None, m=50):
     if flattened.shape[0] < 2:
         return 0.0
 
-    all_gpu_devices = [device.id for device in cuda.list_devices()]
-    matrix_profile = stumpy.gpu_stump(flattened, m=new_m, normalize=False, device_id = all_gpu_devices)
+    #all_gpu_devices = [device.id for device in cuda.list_devices()]
+    #print(all_gpu_devices)
+    #input("Press Enter to continue...")
+    matrix_profile = stumpy.gpu_stump(flattened, m=new_m, normalize=False, device_id = 0)
     #matrix_profile = stumpy.stump(flattened, m=new_m, normalize=False)
     #with Client() as dask_client:
-    #    matrix_profile = stumpy.stumped(dask_client, flattened, m=new_m, normalize=False)
+    #matrix_profile = stumpy.stumped(dask_client, flattened, m=new_m, normalize=False)
     top_k_idx = np.argsort(matrix_profile[:, 0] * math.sqrt(1 / new_m))[-1]
     return matrix_profile[top_k_idx, 0] * math.sqrt(1 / new_m)
 
@@ -238,7 +269,6 @@ def run_discord_analysis(series, selected_channels, n_channels, m=50):
         dict with keys 'all_results', 'mean_scores', 'std_scores'
     """
     prof = discord_profile(selected_channels, n_channels)
-    #print(prof)
     scores_by_arity = {}
     all_results = []
 
@@ -255,11 +285,44 @@ def run_discord_analysis(series, selected_channels, n_channels, m=50):
 
     mean_scores = {a: np.mean(v) for a, v in scores_by_arity.items()}
     std_scores  = {a: np.std(v)  for a, v in scores_by_arity.items()}
+    max_scores =  {a: np.max(v) for a, v in scores_by_arity.items()}
 
     return {
         'all_results': all_results,
         'mean_scores': mean_scores,
         'std_scores':  std_scores,
+        'max_scores': max_scores,
+    }
+
+def run_discord_analysis_PARALLEL(series, selected_channels, n_channels, m=50, workers = 8):
+    prof = discord_profile(selected_channels, n_channels)
+    scores_by_arity = {}
+    all_results = []
+
+    tasks = [
+        (series, subset, m)
+        for subset in prof
+        if len(subset) > 0
+            ]
+
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as executor:
+        for result in tqdm.tqdm(executor.map(score_subset, tasks), total=len(tasks)):
+            if isinstance(result, Exception):
+                print(result)
+                continue
+
+            scores_by_arity.setdefault(result["arity"], []).append(result["score"])
+            all_results.append(result)
+
+    mean_scores = {a: np.mean(v) for a, v in scores_by_arity.items()}
+    std_scores  = {a: np.std(v)  for a, v in scores_by_arity.items()}
+    max_scores  = {a: np.max(v)  for a, v in scores_by_arity.items()}
+
+    return {
+        'all_results': all_results,
+        'mean_scores': mean_scores,
+        'std_scores':  std_scores,
+        'max_scores': max_scores,
     }
 
 def save_analysis_as_dataframe(
@@ -311,12 +374,12 @@ def save_analysis_as_dataframe(
 
 if __name__ == '__main__':
     # Parameters
-    T              = 8000
-    N              = 6
-    k              = 3
-    discord_length = 50
+    T              = 32000
+    N              = 12
+    k              = 6
+    discord_length = 10
     normality_coef = 2
-    m              = 50            # window size for analysis
+    m              = 10            # window size for analysis
     selected_channels = [0, 1, 2]  # channels to analyse
 
     # use N as a hacky way to generate a full dataset that can be then downloaded
@@ -336,18 +399,24 @@ if __name__ == '__main__':
     series = result['series']
     print(f"\nGenerated {N}-channel series of length {T}")
     print(f"Templates: {result['template_names']}")
-    print(f"k-way anomaly channels : {result['k_series']}")
+    print(f"k-way anomaly channels : {sorted(int(c) for c in result['k_series'])}")
     print(f"k-way anomaly window   : [{result['k_way_start']}, {result['k_way_end']})")
 
     # Discord analysis
     print(f"\nRunning discord profile analysis on channels {selected_channels} with m={m}...")
-    analysis = run_discord_analysis(series, selected_channels, N, m=m)
+    analysis = run_discord_analysis_PARALLEL(series, selected_channels, N, m=m)
 
-    print("\nMean anomaly scores by arity:")
+    print("\nAnomaly scores by arity:")
     for arity in sorted(analysis['mean_scores']):
         mean = analysis['mean_scores'][arity]
         std  = analysis['std_scores'][arity]
-        print(f"  Arity {arity}: mean={mean:.4f}  std={std:.4f}")
+        max_score = analysis['max_scores'][arity]
+        print(
+            f"  Arity {arity}: "
+            f"mean={mean:.4f}  "
+            f"std={std:.4f}  "
+            f"max={max_score:.4f}"
+        )
 
     print("\nTop 5 subsets by score:")
     top5 = sorted(analysis['all_results'], key=lambda x: x['score'], reverse=True)[:5]
@@ -357,12 +426,12 @@ if __name__ == '__main__':
 
     #save results in dataset
 
-df = save_analysis_as_dataframe(
-    analysis=analysis,
-    n_channels=N,
-    dataset_name="example",
-    N=N,
-    k=k,
-    T=T,
-    extension="csv"
-)
+    df = save_analysis_as_dataframe(
+        analysis=analysis,
+        n_channels=N,
+        dataset_name="example",
+        N=N,
+        k=k,
+        T=T,
+        extension="csv"
+    )
